@@ -1,3 +1,13 @@
+# Debian 12 N8N一键部署脚本
+
+```Bash
+# N8N一键部署脚本
+wget -O install_n8n.sh "https://raw.githubusercontent.com/zdaben/install_n8n/refs/heads/main/install_n8n.sh" && chmod +x install_n8n.sh && ./install_n8n.sh
+```
+
+
+
+
 #🚀 n8n 终极部署方案 (Debian)
 
 
