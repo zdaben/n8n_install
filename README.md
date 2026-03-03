@@ -165,5 +165,3 @@ sync && echo 3 > /proc/sys/vm/drop_caches
 #查看磁盘占用：
 df -h
 ```
-
-总结： 这一套配置下来，你的 n8n 具备了数据安全（HTTPS）、**大文件支持（100M）以及无人值守更新（Watchtower）**的能力。在 512MB 的 Debian 12 环境下，这已经是目前能做到的最优生产力环境。
