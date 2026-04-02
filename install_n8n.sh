@@ -1,11 +1,11 @@
 #!/bin/bash
 #=================================================================#
 #  System Required: Debian 12+                                    #
-#  Description: n8n Production Deployment & Maintenance Script    #
-#  Version: V5.5 (Auto-Inherit Config, Backups, Fail-Fast)        #
+#  Description: n8n Production Deployment Script (V6.0 Architecture)#
+#  Core Feature: Official Image + Dynamic UI Hot-Patching         #
 #=================================================================#
 
-set -e # 开启 Fail-Fast
+set -e
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -20,6 +20,7 @@ EMAIL=""
 N8N_PORT=""
 RANDOM_KEY=""
 BASIC_AUTH_PASS=""
+TARGET_VERSION=""
 
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -63,7 +64,42 @@ setup_swap() {
     fi
 }
 
-# V5.5 核心机制：旧配置提取
+# ---------------------------------------------------------
+# 新增模块：通过 GitHub 获取最新汉化版本并下载补丁
+# ---------------------------------------------------------
+get_latest_version_and_patch() {
+    echo -e "${GREEN}正在通过 GitHub API 获取最新汉化版本...${PLAIN}"
+    local LATEST_API=$(curl -sL "https://api.github.com/repos/other-blowsnow/n8n-i18n-chinese/releases/latest" || true)
+    local LATEST_VERSION=$(echo "$LATEST_API" | jq -r '.tag_name' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)
+
+    if [ -z "$LATEST_VERSION" ]; then
+        echo -e "${YELLOW}警告：无法获取最新版本号（可能受限），默认回退至已知版本 2.14.2${PLAIN}"
+        LATEST_VERSION="2.14.2"
+    else
+        echo -e "云端最新版本: ${CYAN}${LATEST_VERSION}${PLAIN}"
+    fi
+
+    echo ""
+    read -p "请输入要部署的 n8n 版本号 [默认: ${LATEST_VERSION}]: " INPUT_VERSION
+    TARGET_VERSION=${INPUT_VERSION:-$LATEST_VERSION}
+
+    echo -e "${GREEN}开始下载并配置 V${TARGET_VERSION} 汉化补丁...${PLAIN}"
+    mkdir -p "${N8N_DIR}/n8n_ui"
+    local DL_URL="https://github.com/other-blowsnow/n8n-i18n-chinese/releases/download/n8n%40${TARGET_VERSION}/editor-ui.tar.gz"
+
+    if curl -sLf -o /tmp/editor-ui.tar.gz "$DL_URL"; then
+        echo -e "${GREEN}汉化补丁下载成功，正在解压...${PLAIN}"
+        # 清理旧版补丁并解压新版
+        rm -rf "${N8N_DIR}/n8n_ui/dist"
+        tar -xzf /tmp/editor-ui.tar.gz -C "${N8N_DIR}/n8n_ui"
+        chown -R 1000:1000 "${N8N_DIR}/n8n_ui"
+        rm -f /tmp/editor-ui.tar.gz
+    else
+        echo -e "${RED}严重错误：无法下载 ${TARGET_VERSION} 版本的汉化补丁！可能该版本暂未发布。${PLAIN}"
+        exit 1
+    fi
+}
+
 extract_existing_config() {
     if [ -f "${N8N_DIR}/docker-compose.yml" ]; then
         echo -e "${YELLOW}检测到已有 n8n 部署，正在提取历史配置...${PLAIN}"
@@ -73,7 +109,7 @@ extract_existing_config() {
         EXISTING_PORT=$(grep -E '127.0.0.1:' "${N8N_DIR}/docker-compose.yml" | awk -F':' '{print $2}' || true)
         
         if [ -n "$EXISTING_KEY" ]; then
-            echo -e "${GREEN}成功继承原加密密钥，确保凭据不丢失。${PLAIN}"
+            echo -e "${GREEN}成功继承原加密密钥及配置。${PLAIN}"
             DOMAIN=${EXISTING_DOMAIN}
             RANDOM_KEY=${EXISTING_KEY}
             BASIC_AUTH_PASS=${EXISTING_PASS}
@@ -99,19 +135,22 @@ setup_n8n_config() {
         echo -e "${GREEN}使用继承配置: 域名 ${CYAN}${DOMAIN}${GREEN}, 端口 ${CYAN}${N8N_PORT}${PLAIN}"
     fi
 
-    # 端口检测 (仅针对新装或端口变更的情况)
     if ss -tuln | awk '{print $5}' | grep -E -q ":${N8N_PORT}$" && [ ! -f "${N8N_DIR}/docker-compose.yml" ]; then
         echo -e "${RED}错误：端口 ${N8N_PORT} 已被占用！${PLAIN}"
         exit 1
     fi
 
+    # 获取补丁版本
+    get_latest_version_and_patch
+
     mkdir -p "${N8N_DIR}/n8n_data" "${N8N_DIR}/n8n_files"
     chown -R 1000:1000 "${N8N_DIR}/n8n_data" "${N8N_DIR}/n8n_files"
 
+    # 生成 V6.0 Compose：替换为官方镜像并映射 UI 目录
     cat > "${N8N_DIR}/docker-compose.yml" <<EOF
 services:
   n8n:
-    image: blowsnow/n8n-chinese:latest
+    image: n8nio/n8n:${TARGET_VERSION}
     container_name: n8n
     restart: unless-stopped
     ports:
@@ -151,6 +190,7 @@ services:
     volumes:
       - ./n8n_data:/home/node/.n8n
       - ./n8n_files:/files
+      - ./n8n_ui/dist:/usr/local/lib/node_modules/n8n/node_modules/n8n-editor-ui/dist
 EOF
 
     cd "${N8N_DIR}" || exit 1
@@ -196,10 +236,10 @@ setup_ssl() {
     echo -e "${GREEN}配置 SSL 与 Watchtower...${PLAIN}"
     DNS_CHECK=$(dig +short ${DOMAIN} || true)
     if [ -z "$DNS_CHECK" ]; then
-        echo -e "${YELLOW}警告：域名 ${DOMAIN} 未检测到解析记录。若使用 Cloudflare 代理可能误报，继续执行...${PLAIN}"
+        echo -e "${YELLOW}警告：域名未检测到解析记录。若使用 Cloudflare 代理可能误报。${PLAIN}"
     fi
 
-    certbot --nginx -d ${DOMAIN} --non-interactive --agree-tos --email ${EMAIL} --redirect || echo -e "${YELLOW}SSL 申请跳过或异常（若已有证书请忽略）。${PLAIN}"
+    certbot --nginx -d ${DOMAIN} --non-interactive --agree-tos --email ${EMAIL} --redirect || echo -e "${YELLOW}SSL 申请跳过或异常。${PLAIN}"
 
     docker rm -f watchtower > /dev/null 2>&1 || true
     docker run -d --name watchtower --restart unless-stopped \
@@ -209,7 +249,7 @@ setup_ssl() {
 }
 
 setup_backup() {
-    echo -e "${GREEN}配置每日自动化备份任务...${PLAIN}"
+    echo -e "${GREEN}配置自动化备份任务...${PLAIN}"
     cat > /root/n8n_backup.sh << 'EOF'
 #!/bin/bash
 BACKUP_DIR=/root/n8n_backup
@@ -222,23 +262,22 @@ EOF
 }
 
 update_n8n() {
-    echo -e "${GREEN}执行智能版本更新...${PLAIN}"
+    echo -e "${GREEN}执行 V6.0 深度更新 (拉取官方镜像 + 汉化补丁)...${PLAIN}"
     cd "${N8N_DIR}" || { echo -e "${RED}未找到目录。${PLAIN}"; exit 1; }
     init_docker_compose
     
-    LATEST_VERSION=$(curl -sL "https://registry.hub.docker.com/v2/repositories/blowsnow/n8n-chinese/tags?page_size=100" | jq -r '.results[].name' | grep -E "^[0-9]+\.[0-9]+\.[0-9]+$" | sort -V | tail -n 1 || true)
+    get_latest_version_and_patch
+
+    # 动态更新官方镜像版本号
+    sed -i "s|image: n8nio/n8n:.*|image: n8nio/n8n:${TARGET_VERSION}|g" "${N8N_DIR}/docker-compose.yml"
     
-    [ -z "$LATEST_VERSION" ] && LATEST_VERSION="latest" || echo -e "云端最新版本: ${CYAN}${LATEST_VERSION}${PLAIN}"
-
-    read -p "请输入目标版本号 [默认: ${LATEST_VERSION}]: " INPUT_VERSION
-    TARGET_VERSION=${INPUT_VERSION:-$LATEST_VERSION}
-
-    sed -i "s|image: blowsnow/n8n-chinese:.*|image: blowsnow/n8n-chinese:${TARGET_VERSION}|g" "${N8N_DIR}/docker-compose.yml"
+    # 兼容性修复：防范脚本重复运行导致的第三方镜像名称残留
+    sed -i "s|image: blowsnow/n8n-chinese:.*|image: n8nio/n8n:${TARGET_VERSION}|g" "${N8N_DIR}/docker-compose.yml"
 
     $DOCKER_COMPOSE_CMD pull
     $DOCKER_COMPOSE_CMD up -d
     docker image prune -f
-    echo -e "${GREEN}更新完毕，当前版本: ${CYAN}${TARGET_VERSION}${PLAIN}"
+    echo -e "${GREEN}更新完毕，当前官方底层版本: ${CYAN}${TARGET_VERSION}${PLAIN}"
     exit 0
 }
 
@@ -256,9 +295,13 @@ main() {
     setup_backup
 
     echo -e "\n${GREEN}===========================================================${PLAIN}"
-    echo -e "系统环境升级至 v5.5 架构完成。"
+    echo -e "架构部署/升级至 V6.0 (官版引擎 + 热挂载汉化) 完成。"
     echo -e "管理地址: ${YELLOW}https://${DOMAIN}${PLAIN}"
-    echo -e "当前密钥: ${CYAN}${RANDOM_KEY}${PLAIN} (已从旧配置继承)"
+    echo -e "后端端口: ${YELLOW}127.0.0.1:${N8N_PORT}${PLAIN}"
+    echo -e "底层引擎: ${CYAN}n8nio/n8n:${TARGET_VERSION}${PLAIN}"
+    echo -e "默认账户: ${CYAN}admin${PLAIN}"
+    echo -e "初始密码: ${CYAN}${BASIC_AUTH_PASS}${PLAIN}"
+    echo -e "加密密钥: ${CYAN}${RANDOM_KEY}${PLAIN} ${YELLOW}(请务必妥善保存！)${PLAIN}"
     echo -e "新增功能: 每日凌晨3点全量备份 (/root/n8n_backup)、Nginx 超时保活防断连"
     echo -e "${GREEN}===========================================================${PLAIN}"
 }
