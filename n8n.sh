@@ -18,7 +18,10 @@ BACKUP_DIR="${N8N_DIR}/backup"
 DOCKER_COMPOSE_CMD=""
 
 check_root() {
-    [[ $EUID -ne 0 ]] && echo -e "${RED}错误：必须使用 root 用户运行。${PLAIN}" && exit 1
+    if [[ $EUID -ne 0 ]]; then
+        echo -e "${RED}错误：必须使用 root 用户运行。${PLAIN}"
+        exit 1
+    fi
 }
 
 init_docker_compose() {
@@ -33,7 +36,10 @@ init_docker_compose() {
 }
 
 cmd_show_panel() {
-    [ ! -f "${N8N_DIR}/docker-compose.yml" ] && echo -e "${YELLOW}n8n 尚未配置，请执行 n8n install 开始。${PLAIN}" && exit 0
+    if [ ! -f "${N8N_DIR}/docker-compose.yml" ]; then
+        echo -e "${YELLOW}n8n 尚未配置，请执行 n8n install 开始。${PLAIN}"
+        exit 0
+    fi
     
     local DOMAIN=$(grep -E 'N8N_HOST=' "${N8N_DIR}/docker-compose.yml" | cut -d'=' -f2 | tr -d '"\r' || echo "未知")
     local PASS=$(grep -E 'N8N_BASIC_AUTH_PASSWORD=' "${N8N_DIR}/docker-compose.yml" | cut -d'=' -f2 | tr -d '"\r' || echo "未知")
@@ -76,7 +82,11 @@ cmd_install() {
     MEM_TOTAL=$(free -m | awk '/Mem/{print $2}')
     if [ "$MEM_TOTAL" -le 2048 ] && [ ! -f /swapfile ]; then
         echo -e "${GREEN}==> 配置虚拟内存...${PLAIN}"
-        [ "$MEM_TOTAL" -le 600 ] && SWAP_SIZE_MB=2048 || SWAP_SIZE_MB=1024
+        if [ "$MEM_TOTAL" -le 600 ]; then
+            SWAP_SIZE_MB=2048
+        else
+            SWAP_SIZE_MB=1024
+        fi
         fallocate -l ${SWAP_SIZE_MB}M /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=${SWAP_SIZE_MB}
         chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
         echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab || true
@@ -110,7 +120,10 @@ cmd_install() {
         echo -e "${YELLOW}提示：域名解析 IP ($DNS_IP) 与本机 IP ($SERVER_IP) 不一致。${PLAIN}"
         echo -e "如使用 CDN 代理，此为正常现象。"
         read -p "是否继续？(y/n) [默认: y]: " FORCE_DNS
-        [[ "$FORCE_DNS" =~ ^[Nn]$ ]] && echo "已终止。" && exit 1
+        if [[ "$FORCE_DNS" =~ ^[Nn]$ ]]; then
+            echo "已终止。"
+            exit 1
+        fi
     fi
 
     LATEST_API=$(curl -sL "https://api.github.com/repos/other-blowsnow/n8n-i18n-chinese/releases/latest" || true)
@@ -233,9 +246,15 @@ cmd_backup() {
 cmd_recover() {
     init_docker_compose; set +e
     echo -e "${CYAN}--- 数据恢复面板 ---${PLAIN}"
-    [ ! -d "${BACKUP_DIR}" ] && echo "未找到备份文件" && exit 1
+    if [ ! -d "${BACKUP_DIR}" ]; then
+        echo "未找到备份文件"
+        exit 1
+    fi
     ls -lh "${BACKUP_DIR}"/n8n_*.tar.gz | awk '{print NR". "$9" ("$5")"}' | sed "s|${BACKUP_DIR}/||"
-    read -p "请选择恢复编号 (输入 0 取消): " IDX; [ "$IDX" -eq 0 ] && exit 0
+    read -p "请选择恢复编号 (输入 0 取消): " IDX
+    if [ "$IDX" -eq 0 ]; then
+        exit 0
+    fi
     FILE=$(ls "${BACKUP_DIR}"/n8n_*.tar.gz | sed -n "${IDX}p")
     cd "${N8N_DIR}" && $DOCKER_COMPOSE_CMD down
     rm -rf n8n_data n8n_files docker-compose.yml
@@ -252,7 +271,9 @@ cmd_uninstall() {
     if [ "$CONFIRM" == "yes" ]; then
         echo -e "${GREEN}==> 清理数据与容器...${PLAIN}"
         init_docker_compose
-        [ -d "${N8N_DIR}" ] && cd "${N8N_DIR}" && $DOCKER_COMPOSE_CMD down -v || true
+        if [ -d "${N8N_DIR}" ]; then
+            cd "${N8N_DIR}" && $DOCKER_COMPOSE_CMD down -v || true
+        fi
         rm -rf "${N8N_DIR}"
         
         echo -e "${GREEN}==> 清理 Nginx 与定时任务...${PLAIN}"
