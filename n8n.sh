@@ -18,10 +18,7 @@ BACKUP_DIR="${N8N_DIR}/backup"
 DOCKER_COMPOSE_CMD=""
 
 check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        echo -e "${RED}错误：必须使用 root 用户运行。${PLAIN}"
-        exit 1
-    fi
+    [[ $EUID -ne 0 ]] && echo -e "${RED}错误：必须使用 root 用户运行。${PLAIN}" && exit 1
 }
 
 init_docker_compose() {
@@ -43,7 +40,11 @@ cmd_show_panel() {
     
     local DOMAIN=$(grep -E 'N8N_HOST=' "${N8N_DIR}/docker-compose.yml" | cut -d'=' -f2 | tr -d '"\r' || echo "未知")
     local PASS=$(grep -E 'N8N_BASIC_AUTH_PASSWORD=' "${N8N_DIR}/docker-compose.yml" | cut -d'=' -f2 | tr -d '"\r' || echo "未知")
-    local PORT=$(grep -E '127.0.0.1:' "${N8N_DIR}/docker-compose.yml" | awk -F':' '{print $2}' || echo "5678")
+    local KEY=$(grep -E 'N8N_ENCRYPTION_KEY=' "${N8N_DIR}/docker-compose.yml" | cut -d'=' -f2 | tr -d '"\r' || echo "未知")
+    
+    # 修复端口正则截取逻辑
+    local PORT=$(grep -oE '127\.0\.0\.1:[0-9]+' "${N8N_DIR}/docker-compose.yml" | cut -d':' -f2 | head -n 1)
+    [ -z "$PORT" ] && PORT="5678"
 
     echo -e "\n${GREEN}===========================================================${PLAIN}"
     echo -e "${GREEN}n8n 管理面板${PLAIN}"
@@ -51,6 +52,7 @@ cmd_show_panel() {
     echo -e "访问地址: ${YELLOW}https://${DOMAIN}${PLAIN}"
     echo -e "管理账号: ${CYAN}admin${PLAIN}"
     echo -e "管理密码: ${CYAN}${PASS}${PLAIN}"
+    echo -e "加密密钥: ${CYAN}${KEY}${PLAIN} ${YELLOW}(务必妥善保存)${PLAIN}"
     echo -e "映射端口: ${CYAN}${PORT}${PLAIN}"
     echo -e "-----------------------------------------------------------"
     echo -e "${GREEN}命令列表:${PLAIN}"
@@ -100,7 +102,7 @@ cmd_install() {
         OLD_DOMAIN=$(grep -E 'N8N_HOST=' "${N8N_DIR}/docker-compose.yml" | cut -d'=' -f2 | tr -d '"\r' || true)
         OLD_KEY=$(grep -E 'N8N_ENCRYPTION_KEY=' "${N8N_DIR}/docker-compose.yml" | cut -d'=' -f2 | tr -d '"\r' || true)
         OLD_PASS=$(grep -E 'N8N_BASIC_AUTH_PASSWORD=' "${N8N_DIR}/docker-compose.yml" | cut -d'=' -f2 | tr -d '"\r' || true)
-        OLD_PORT=$(grep -E '127.0.0.1:' "${N8N_DIR}/docker-compose.yml" | awk -F':' '{print $2}' || true)
+        OLD_PORT=$(grep -oE '127\.0\.0\.1:[0-9]+' "${N8N_DIR}/docker-compose.yml" | cut -d':' -f2 | head -n 1 || true)
     fi
 
     read -p "请输入域名 (默认: ${OLD_DOMAIN:-ema.ink}): " INPUT_DOMAIN
@@ -209,7 +211,10 @@ EOF
     ln -sf /etc/nginx/sites-available/n8n /etc/nginx/sites-enabled/
     nginx -t && systemctl reload nginx
 
-    certbot --nginx -d ${DOMAIN} --non-interactive --agree-tos --email ${EMAIL} --redirect || true
+    # 关键修复：加入 --keep-until-expiring 解决二次安装时 Certbot 因已有证书而罢工导致只有 HTTP 的问题
+    echo -e "${GREEN}==> 配置 SSL 证书...${PLAIN}"
+    certbot --nginx -d ${DOMAIN} --non-interactive --agree-tos --email ${EMAIL} --redirect --keep-until-expiring || echo -e "${YELLOW}警告：SSL 配置异常，请后续手动执行 certbot --nginx 修复。${PLAIN}"
+    
     (crontab -l 2>/dev/null | grep -v "n8n backup"; echo "0 3 * * * /usr/local/bin/n8n backup > /dev/null 2>&1") | crontab - || true
 
     cmd_show_panel
