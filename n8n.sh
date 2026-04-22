@@ -61,7 +61,6 @@ cmd_show_panel() {
     echo -e "-----------------------------------------------------------"
     echo -e "${GREEN}命令列表:${PLAIN}"
     echo -e "  ${YELLOW}n8n status${PLAIN}    - 查看服务状态与资源占用"
-    echo -e "  ${YELLOW}n8n top${PLAIN}       - 查看实时资源监控"
     echo -e "  ${YELLOW}n8n update${PLAIN}    - 更新官方引擎与汉化补丁"
     echo -e "  ${YELLOW}n8n restart${PLAIN}   - 重启容器服务"
     echo -e "  ${YELLOW}n8n backup${PLAIN}    - 执行数据与配置备份"
@@ -71,6 +70,26 @@ cmd_show_panel() {
     echo -e "-----------------------------------------------------------"
     echo -e "数据目录: ${CYAN}${N8N_DIR}${PLAIN}"
     echo -e "${GREEN}===========================================================${PLAIN}"
+}
+
+# --- 封装通用汉化包下载模块，应对 Tag 规则多变 ---
+download_i18n_patch() {
+    local TVERSION=$1
+    echo -e "${GREEN}==> 正在匹配汉化资源包...${PLAIN}"
+    # 路由 1: 适配最新版本规则 (release/2.17.3)
+    local URL_NEW="https://github.com/other-blowsnow/n8n-i18n-chinese/releases/download/release%2F${TVERSION}/editor-ui.tar.gz"
+    # 路由 2: 适配老版本规则 (n8n@2.14.2)
+    local URL_OLD="https://github.com/other-blowsnow/n8n-i18n-chinese/releases/download/n8n%40${TVERSION}/editor-ui.tar.gz"
+
+    if curl -sLf -o /tmp/editor-ui.tar.gz "$URL_NEW"; then
+        echo -e "${CYAN}命中新版资源仓库格式。${PLAIN}"
+        return 0
+    elif curl -sLf -o /tmp/editor-ui.tar.gz "$URL_OLD"; then
+        echo -e "${CYAN}命中旧版资源仓库格式。${PLAIN}"
+        return 0
+    else
+        return 1
+    fi
 }
 
 cmd_install() {
@@ -137,10 +156,11 @@ cmd_install() {
     TARGET_VERSION=$(echo "$LATEST_API" | jq -r '.tag_name' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "2.14.2")
 
     mkdir -p "${N8N_DIR}/n8n_ui"
-    DL_URL="https://github.com/other-blowsnow/n8n-i18n-chinese/releases/download/n8n%40${TARGET_VERSION}/editor-ui.tar.gz"
-    if curl -sLf -o /tmp/editor-ui.tar.gz "$DL_URL"; then
+    if download_i18n_patch "$TARGET_VERSION"; then
         rm -rf "${N8N_DIR}/n8n_ui/dist" && tar -xzf /tmp/editor-ui.tar.gz -C "${N8N_DIR}/n8n_ui"
         chown -R 1000:1000 "${N8N_DIR}/n8n_ui" && rm -f /tmp/editor-ui.tar.gz
+    else
+        echo -e "${YELLOW}警告: 未找到该版本的汉化补丁，可能导致 UI 资源缺失。系统将继续仅更新 n8n 官方引擎。${PLAIN}"
     fi
 
     cat > "${N8N_DIR}/docker-compose.yml" <<EOF
@@ -237,8 +257,8 @@ cmd_update() {
     echo -e "云端最新稳定版: ${YELLOW}${TARGET_VERSION}${PLAIN}"
 
     if [ "$CURRENT_VERSION" == "$TARGET_VERSION" ] && [ "$CURRENT_VERSION" != "未知" ]; then
-        echo -e "\n${GREEN}当前已经是最新稳定版本，无需更新。${PLAIN}"
-        read -p "是否强制重新拉取并覆盖安装？(y/n) [默认: n]: " FORCE_UPDATE
+        echo -e "\n${GREEN}当前已经是最新稳定版本。${PLAIN}"
+        read -p "是否强制重新拉取补丁并覆盖安装？(y/n) [默认: n]: " FORCE_UPDATE
         if [[ ! "$FORCE_UPDATE" =~ ^[Yy]$ ]]; then
             echo "已取消更新。"
             exit 0
@@ -250,9 +270,8 @@ cmd_update() {
     TARGET_VERSION=${IV:-$TARGET_VERSION}
 
     echo -e "${GREEN}==> 开始下载并更新至 ${TARGET_VERSION}...${PLAIN}"
-    DL_URL="https://github.com/other-blowsnow/n8n-i18n-chinese/releases/download/n8n%40${TARGET_VERSION}/editor-ui.tar.gz"
-    
-    if curl -sLf -o /tmp/editor-ui.tar.gz "$DL_URL"; then
+    mkdir -p "${N8N_DIR}/n8n_ui"
+    if download_i18n_patch "$TARGET_VERSION"; then
         rm -rf "${N8N_DIR}/n8n_ui/dist" && tar -xzf /tmp/editor-ui.tar.gz -C "${N8N_DIR}/n8n_ui"
         chown -R 1000:1000 "${N8N_DIR}/n8n_ui" && rm -f /tmp/editor-ui.tar.gz
     else
@@ -280,7 +299,6 @@ cmd_recover() {
     init_docker_compose
     echo -e "${CYAN}--- 数据恢复面板 ---${PLAIN}"
     
-    # 【修复项】检查目录是否存在，且目录中是否包含有效备份文件
     if [ ! -d "${BACKUP_DIR}" ] || ! ls "${BACKUP_DIR}"/n8n_*.tar.gz 1> /dev/null 2>&1; then
         echo -e "${YELLOW}未找到任何备份归档文件！${PLAIN}"
         exit 1
