@@ -226,20 +226,48 @@ EOF
 
 cmd_update() {
     check_root; init_docker_compose
-    echo -e "${GREEN}==> 检测版本更新...${PLAIN}"
+    echo -e "${GREEN}==> 检测版本信息...${PLAIN}"
+    
+    # 1. 提取当前本地运行的版本
+    local CURRENT_VERSION=$(grep -oE 'n8nio/n8n:[a-zA-Z0-9.-]+' "${N8N_DIR}/docker-compose.yml" | cut -d':' -f2 || echo "未知")
+    echo -e "当前本地版本: ${CYAN}${CURRENT_VERSION}${PLAIN}"
+
+    # 2. 拉取最新稳定版 (基于汉化补丁发布的最新对齐版本)
+    echo "正在拉取最新稳定版信息..."
     local LATEST_API=$(curl -sL "https://api.github.com/repos/other-blowsnow/n8n-i18n-chinese/releases/latest" || true)
     local TARGET_VERSION=$(echo "$LATEST_API" | jq -r '.tag_name' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "latest")
-    read -p "目标版本 [默认: ${TARGET_VERSION}]: " IV; TARGET_VERSION=${IV:-$TARGET_VERSION}
+    echo -e "云端最新稳定版: ${YELLOW}${TARGET_VERSION}${PLAIN}"
 
+    # 3. 版本一致性防呆检测
+    if [ "$CURRENT_VERSION" == "$TARGET_VERSION" ] && [ "$CURRENT_VERSION" != "未知" ]; then
+        echo -e "\n${GREEN}当前已经是最新稳定版本，无需更新。${PLAIN}"
+        read -p "是否强制重新拉取并覆盖安装？(y/n) [默认: n]: " FORCE_UPDATE
+        if [[ ! "$FORCE_UPDATE" =~ ^[Yy]$ ]]; then
+            echo "已取消更新。"
+            exit 0
+        fi
+    fi
+
+    echo ""
+    read -p "请输入要更新的目标版本号 [默认: ${TARGET_VERSION}]: " IV
+    TARGET_VERSION=${IV:-$TARGET_VERSION}
+
+    echo -e "${GREEN}==> 开始下载并更新至 ${TARGET_VERSION}...${PLAIN}"
     DL_URL="https://github.com/other-blowsnow/n8n-i18n-chinese/releases/download/n8n%40${TARGET_VERSION}/editor-ui.tar.gz"
+    
     if curl -sLf -o /tmp/editor-ui.tar.gz "$DL_URL"; then
         rm -rf "${N8N_DIR}/n8n_ui/dist" && tar -xzf /tmp/editor-ui.tar.gz -C "${N8N_DIR}/n8n_ui"
         chown -R 1000:1000 "${N8N_DIR}/n8n_ui" && rm -f /tmp/editor-ui.tar.gz
+    else
+        echo -e "${YELLOW}警告: 未找到该版本的汉化补丁，可能导致 UI 资源缺失。系统将继续仅更新 n8n 官方引擎。${PLAIN}"
     fi
+    
     sed -i "s|image: n8nio/n8n:.*|image: n8nio/n8n:${TARGET_VERSION}|g" "${N8N_DIR}/docker-compose.yml"
     cd "${N8N_DIR}" && $DOCKER_COMPOSE_CMD pull && $DOCKER_COMPOSE_CMD up -d
+    
+    # 清理产生的旧版本废弃镜像以释放磁盘空间
     docker image prune -f
-    echo -e "${GREEN}更新完成。${PLAIN}"
+    echo -e "${GREEN}更新完成！系统当前已运行版本: ${CYAN}${TARGET_VERSION}${PLAIN}"
 }
 
 cmd_backup() {
@@ -301,7 +329,20 @@ cmd_uninstall() {
 case "$1" in
     install)   cmd_install ;;
     update)    cmd_update ;;
-    status|top) init_docker_compose && docker ps -f name=n8n && echo "" && docker stats n8n ;;
+    status) 
+        init_docker_compose
+        local VERSION=$(grep -oE 'n8nio/n8n:[a-zA-Z0-9.-]+' "${N8N_DIR}/docker-compose.yml" | cut -d':' -f2 || echo "未知")
+        echo -e "\n${GREEN}▶ n8n 当前运行版本: ${CYAN}${VERSION}${PLAIN}"
+        echo -e "-----------------------------------------------------------"
+        docker ps -f name=n8n
+        echo -e "\n${GREEN}▶ 资源占用情况 (静态快照):${PLAIN}"
+        docker stats --no-stream n8n 
+        ;;
+    top) 
+        init_docker_compose
+        echo -e "${YELLOW}提示: 正在进入实时监控模式，按 Ctrl+C 退出。${PLAIN}"
+        docker stats n8n 
+        ;;
     restart)   init_docker_compose && cd "${N8N_DIR}" && $DOCKER_COMPOSE_CMD restart ;;
     backup)    cmd_backup ;;
     recover)   cmd_recover ;;
