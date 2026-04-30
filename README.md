@@ -1,154 +1,83 @@
-# Debian 12 N8N一键部署脚本
+# n8n CLI Management Tool 🚀
 
-```Bash
-# N8N一键部署脚本
+一个专为 **Debian 12+** 环境打造的 n8n 一键部署与命令行管理工具。支持自动化安装、Nginx 反代配置、Let's Encrypt SSL 证书申请、容器资源监控、数据备份恢复，并内置了 n8n 中文汉化补丁。
+
+
+## ✨ 核心特性
+
+* 📦 **一键自动化部署**：自动检测并安装 Docker 环境，配置虚拟内存 (Swap) 防 OOM，自动生成高强度初始密码与密钥。
+* 🌐 **内建中文汉化**：自动拉取并匹配官方引擎版本的第三方 UI 汉化包 (`other-blowsnow/n8n-i18n-chinese`)。
+* 🔐 **自动反代与 SSL**：集成了 Nginx 自动配置与 Certbot 证书申请，开箱即用的 HTTPS 支持。
+* 🛡️ **完善的数据灾备**：自动配置每日凌晨 3 点定时备份，支持命令行一键执行全量备份与按需恢复。
+* 📊 **直观的运维监控**：提供容器状态查看（静态快照）与实时资源监控（Top 模式）。
+* 🧹 **绿色纯净卸载**：支持一键清理所有相关容器、本地数据、Nginx 配置和定时任务。
+
+
+## 🛠️ 系统要求
+
+* **操作系统**：Debian 12 及以上版本 (推荐) / Ubuntu 22.04+
+* **权限要求**：必须使用 `root` 用户执行。
+* **网络要求**：如果使用域名，请确保域名已正确解析至本机 IP（CDN 代理用户可忽略 IP 一致性校验）。
+
+
+## 🚀 快速开始
+
+### 1. 下载并赋予执行权限
+您可以将此脚本下载到系统环境变量路径中，方便全局调用：
+
+```bash
 apt update -y && apt install curl wget sudo -y && curl -sSLo /usr/local/bin/n8n https://raw.githubusercontent.com/zdaben/n8n_install/main/n8n.sh && chmod +x /usr/local/bin/n8n && n8n install
 ```
 
+### 2. 执行安装
 
+```bash
+n8n install
 
-
-#🚀 n8n 终极部署方案 (Debian)
-
-
-## 第一阶段：系统加固与内存优化
-
-
-```Bash
-
-# 更新系统
-apt update && apt upgrade -y
 ```
+根据终端提示，依次输入您的**绑定域名**、**SSL 申请邮箱**以及**本地映射端口**（默认 5678）。系统将自动完成剩余的所有工作。
 
-```Bash
-# 安装基础依赖
-apt install -y curl vim git ufw nginx certbot python3-certbot-nginx
-```
 
-## 第二阶段：Docker 环境安装
+## 🧰 命令列表
+在终端中输入 `n8n` 即可调出管理面板并查看基础信息（管理地址、账号密码、密钥等）。其他快捷指令如下：
 
-```Bash
+| 命令 | 功能描述 |
+| --- | --- |
+| n8n | 显示管理面板、访问信息及当前状态 |
+| n8n install | 首次安装或修改当前配置（覆盖重装） |
+| n8n update | 检查并更新官方最新引擎及匹配的汉化补丁 |
+| n8n status | 查看当前运行版本及 Docker 资源静态快照 |
+| n8n top | 进入实时监控模式，查看容器 CPU/内存 占用情况 |
+| n8n restart | 重启 n8n 容器服务 |
+| n8n backup | 立即执行数据目录与配置文件的打包备份 |
+| n8n recover | 呼出恢复面板，从历史归档中选择并恢复数据 |
+| n8n uninstall | 【危险】卸载服务并清理所有数据、配置及定时任务 |
 
-# 官方一键脚本
-curl -fsSL https://get.docker.com -o get-docker.sh
-sh get-docker.sh
-```
 
-```Bash
-# 设置开机自启
-systemctl enable --now docker
-```
-## 第三阶段：目录与权限预设 (核心避坑步)
-这是解决 EACCES: permission denied 报错的关键。
+## 📂 目录结构与数据挂载
+所有核心数据均默认存储在宿主机 `/root/n8n` 目录下，您可以随时备份或迁移该目录：
 
-```Bash
+```plaintext
+/root/n8n/
+├── n8n_data/           # n8n 核心数据库与用户配置 (.n8n 目录)
+├── n8n_files/          # n8n 本地文件挂载目录，供工作流读写本地文件
+├── n8n_ui/             # 汉化补丁 UI 资源挂载目录
+├── backup/             # 自动/手动备份的 .tar.gz 归档存放处
+└── docker-compose.yml  # 核心容器编排配置文件
 
-# 创建工作目录
-mkdir -p ~/n8n/n8n_data
-```
-
-```Bash
-# 预先授权给容器内的 node 用户 (UID 1000)
-chown -R 1000:1000 ~/n8n/n8n_data
-chmod -R 775 ~/n8n/n8n_data
-```
-
-## 第四阶段：配置 docker-compose.yml
-
-```Bash
-cd ~/n8n && vi docker-compose.yml
-```
-
-```YAML
-
-services:
-  n8n:
-    image: blowsnow/n8n-chinese:latest
-    container_name: n8n
-    restart: always
-    ports:
-      - "5678:5678"
-    environment:
-      - N8N_HOST=yourdomain.com              # 替换为你的域名      
-      - N8N_PORT=5678
-      - N8N_PROTOCOL=https
-      - NODE_ENV=production
-      - WEBHOOK_URL=https://yourdomain.com              # 替换为你的域名/
-      - GENERIC_TIMEZONE=Asia/Shanghai
-      - N8N_DEFAULT_LOCALE=zh-CN
-      # --- 小内存深度优化 ---
-      - N8N_PAYLOAD_SIZE_MAX=100              # 允许 100MB 附件
-      - N8N_BINARY_DATA_MODE=filesystem       # 图片存硬盘，不占内存
-      - N8N_BINARY_DATA_STORAGE_PATH=/home/node/.n8n/binaryData
-      - EXECUTIONS_DATA_PRUNE=true           # 开启自动清理
-      - EXECUTIONS_DATA_MAX_AGE=72           # 仅保留 3 天数据
-    volumes:
-      - ./n8n_data:/home/node/.n8n
-```
-```Bash
-#启动服务：
-docker compose up -d
 ```
 
 
-## 第五阶段：Nginx 反向代理配置
-```Bash
-vi /etc/nginx/sites-available/n8n
-```
+## 💡 常见问题与注意事项
 
-```Nginx
-
-server {
-    listen 80;
-    server_name yourdomain.com              # 替换为你的域名;
-
-    # 解决大图上传无响应的核心配置
-    client_max_body_size 100M; 
-
-    location / {
-        proxy_pass http://127.0.0.1:5678;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # 支持 WebSocket 实时同步
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        
-        proxy_buffering off;
-    }
-}
-```
-
-激活并生效：
-
-```Bash
-ln -s /etc/nginx/sites-available/n8n /etc/nginx/sites-enabled/
-nginx -t && systemctl reload nginx
-```
-
-## 第六阶段：HTTPS 证书与自动维护
-
-### 1. 一键申请证书：
-选 2 (Redirect) 实现全站加密
-```Bash
-certbot --nginx -d yourdomain.com              # 替换为你的域名
-```
-
-
-### 2. 开启凌晨 24 点自动更新：
-
-```Bash
-
-docker run -d \
-  --name watchtower \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  containrrr/watchtower \
-  --cleanup \
-  --schedule "0 0 0 * * *" \
-  n8n
-```
+1. **域名解析 IP 不一致警告**：
+如果您使用了 Cloudflare 等 CDN 代理，脚本检测到解析 IP 与服务器物理 IP 不一致时会触发提示。这是正常现象，输入 `y` 强制继续即可。
+2. **忘记管理员密码或密钥**：
+直接在终端执行 `n8n`，面板将打印出 `docker-compose.yml` 中记录的访问地址、账号、密码及加密密钥。
+3. **汉化补丁更新延迟**：
+如果 n8n 官方刚发布新版本，第三方汉化包可能尚未同步更新。脚本会自动检测，若未匹配到对应版本的汉化包，将继续仅更新官方引擎而不中断服务。
+4. **SSL 证书续签**：
+安装时已通过 Certbot 自动配置证书。证书到期前系统通常会自动续签，若遇到问题，可手动执行 `certbot renew`。
 
 ## 🛠 常用维护指令备忘
 
