@@ -150,19 +150,26 @@ cmd_secrets() {
     echo -e "================================\n"
 }
 
-# --- 5. 支持参数化控制 retention 清理的备份函数 ---
+# --- 5. 支持参数化控制 retention 清理与友好交互提示的备份函数 ---
 cmd_backup() {
     local DO_PRUNE="${1:-true}"
     mkdir -p "${BACKUP_DIR}"
     local FILE="${BACKUP_DIR}/n8n_$(date +%Y%m%d_%H%M%S).tar.gz"
     cd "${N8N_DIR}"
+
+    echo -e "${GREEN}==> 正在创建数据与配置全量备份，请稍候...${PLAIN}"
+    echo -e "归档目标: ${CYAN}n8n_data, n8n_files, n8n_ui, docker-compose.yml${PLAIN}"
+
+    # 后台执行压缩
     nice -n 19 ionice -c2 -n7 tar czf "${FILE}" n8n_data n8n_files n8n_ui docker-compose.yml
+
+    local FILE_SIZE=$(du -h "${FILE}" | awk '{print $1}')
 
     if [ "$DO_PRUNE" = "true" ]; then
         find "${BACKUP_DIR}" -name "n8n_*.tar.gz" -mtime +7 -delete
-        echo -e "${GREEN}备份完成: ${CYAN}${FILE}${PLAIN} (已清理 7 天前旧归档)"
+        echo -e "${GREEN}✅ 备份完成！归档文件: ${CYAN}${FILE}${PLAIN} [大小: ${YELLOW}${FILE_SIZE}${PLAIN}] (已清理 7 天前旧归档)"
     else
-        echo -e "${GREEN}快照完成: ${CYAN}${FILE}${PLAIN} (安全快照，跳过自动清理)"
+        echo -e "${GREEN}✅ 快照完成！归档文件: ${CYAN}${FILE}${PLAIN} [大小: ${YELLOW}${FILE_SIZE}${PLAIN}]"
     fi
     LATEST_BACKUP_FILE="$FILE"
 }
