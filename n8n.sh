@@ -36,16 +36,33 @@ init_docker_compose() {
     fi
 }
 
-# --- 1. 严格从官方 API 查询 Stable 版本，绝不硬编码 fallback ---
+# --- 1. 多通道精确获取官方最新 Stable 版本 (NPM -> GitHub -> DockerHub) ---
 get_official_latest_version() {
-    local VER
-    VER=$(curl -fsSL "https://api.github.com/repos/n8n-io/n8n/releases/tags/stable" 2>/dev/null \
-        | jq -r '.name // empty' \
-        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' \
-        | head -n1 || true)
+    local VER=""
+
+    # 优先源 1: NPM 官方源 (权威、同步最快、全球 CDN 加速、无 GitHub API 速率限制)
+    VER=$(curl -fsSL --connect-timeout 5 --max-time 10 "https://registry.npmjs.org/n8n/latest" 2>/dev/null \
+        | jq -r '.version // empty' 2>/dev/null || true)
+
+    # 备用源 2: GitHub 官方 releases/latest (非 tags/stable，避免 404)
+    if [ -z "$VER" ]; then
+        VER=$(curl -fsSL --connect-timeout 5 --max-time 10 -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/n8n-io/n8n/releases/latest" 2>/dev/null \
+            | jq -r '.tag_name // .name // empty' 2>/dev/null \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' \
+            | head -n1 || true)
+    fi
+
+    # 备用源 3: Docker Hub 官方镜像 Tag 列表
+    if [ -z "$VER" ]; then
+        VER=$(curl -fsSL --connect-timeout 5 --max-time 10 "https://hub.docker.com/v2/repositories/n8nio/n8n/tags/?page_size=20" 2>/dev/null \
+            | jq -r '.results[].name' 2>/dev/null \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V \
+            | tail -n1 || true)
+    fi
 
     if [ -z "$VER" ]; then
-        echo -e "${RED}错误：无法连接 GitHub 获取 n8n 官方 Stable 版本，操作已终止。${PLAIN}" >&2
+        echo -e "${RED}错误：无法连接上游源获取 n8n 最新版本，请检查服务器网络。${PLAIN}" >&2
         return 1
     fi
     echo "$VER"
