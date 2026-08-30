@@ -1,7 +1,7 @@
 #!/bin/bash
 #=================================================================#
 #  System Required: Debian 12+ / Ubuntu 22+                       #
-#  Description: n8n CLI Management Tool (V2.5 Bulletproof)        #
+#  Description: n8n CLI Management Tool (V2.5 Enterprise Final)   #
 #  Author: zdaben (https://github.com/zdaben/n8n_install)         #
 #=================================================================#
 
@@ -37,7 +37,7 @@ init_docker_compose() {
     fi
 }
 
-# --- 1. 与 n8n 官方 dist-tags (stable 轨道) 保持 100% 严格对齐 ---
+# --- 1. 严格读取官方 dist-tags (Stable 轨道)，绝不猜版本 ---
 get_official_latest_version() {
     local VER=""
 
@@ -60,6 +60,7 @@ get_official_latest_version() {
     echo "$VER"
 }
 
+# --- 2. 精确从专属自建仓库下载对应版本的汉化包 ---
 download_i18n_patch() {
     local TVERSION="$1"
     echo -e "${GREEN}==> 正在检索 v${TVERSION} 汉化补丁包...${PLAIN}"
@@ -75,6 +76,7 @@ download_i18n_patch() {
     fi
 }
 
+# --- 3. 显式动态管理 Compose 文件的 UI 挂载（彻底杜绝跨版本残留） ---
 set_i18n_mount() {
     local ENABLE="$1"
     local COMPOSE_FILE="${N8N_DIR}/docker-compose.yml"
@@ -87,6 +89,7 @@ set_i18n_mount() {
     fi
 }
 
+# --- 4. 服务健康就绪探针 (最长等待 60s) ---
 wait_for_n8n() {
     local PORT="$1"
     echo -e "${GREEN}==> 正在等待 n8n 服务健康就绪...${PLAIN}"
@@ -110,7 +113,7 @@ cmd_show_panel() {
     local PORT=$(grep -oE '127\.0\.0\.1:[0-9]+' "${N8N_DIR}/docker-compose.yml" | cut -d':' -f2 | head -n 1 || echo "5678")
 
     echo -e "\n${GREEN}===========================================================${PLAIN}"
-    echo -e "${GREEN}n8n 管理面板 (V2.5 Bulletproof)${PLAIN}"
+    echo -e "${GREEN}n8n 管理面板 (V2.5 Enterprise)${PLAIN}"
     echo -e "-----------------------------------------------------------"
     echo -e "访问地址: ${YELLOW}https://${DOMAIN}${PLAIN}"
     echo -e "管理账号: ${CYAN}admin${PLAIN}"
@@ -118,13 +121,13 @@ cmd_show_panel() {
     echo -e "加密密钥: ${CYAN}********${PLAIN} ${YELLOW}(运行 'n8n secrets' 查看明文)${PLAIN}"
     echo -e "内部端口: ${CYAN}${PORT}${PLAIN}"
     echo -e "-----------------------------------------------------------"
-    echo -e "命令列表:"
+    echo -e "常用指令:"
     echo -e "  ${YELLOW}n8n status${PLAIN}    - 查看服务状态与资源占用"
     echo -e "  ${YELLOW}n8n update${PLAIN}    - 升级引擎 (支持双层安全回滚)"
     echo -e "  ${YELLOW}n8n secrets${PLAIN}   - 查看明文账号、密码与加密密钥"
     echo -e "  ${YELLOW}n8n restart${PLAIN}   - 重启容器服务"
     echo -e "  ${YELLOW}n8n backup${PLAIN}    - 立即全量备份 (含数据、UI 与配置)"
-    echo -e "  ${YELLOW}n8n recover${PLAIN}   - 从历史归档中安全恢复 (带防删保护)"
+    echo -e "  ${YELLOW}n8n recover${PLAIN}   - 从历史归档中安全恢复 (带防误删保护)"
     echo -e "  ${RED}n8n uninstall${PLAIN} - 彻底卸载并清理数据"
     echo -e "===========================================================${PLAIN}"
 }
@@ -145,7 +148,7 @@ cmd_secrets() {
     echo -e "================================\n"
 }
 
-# --- 支持参数化控制 retention 清理的备份函数 ---
+# --- 5. 支持参数化控制 retention 清理的备份函数 ---
 cmd_backup() {
     local DO_PRUNE="${1:-true}"
     mkdir -p "${BACKUP_DIR}"
@@ -157,7 +160,7 @@ cmd_backup() {
         find "${BACKUP_DIR}" -name "n8n_*.tar.gz" -mtime +7 -delete
         echo -e "${GREEN}备份完成: ${CYAN}${FILE}${PLAIN} (已清理 7 天前旧归档)"
     else
-        echo -e "${GREEN}快照完成: ${CYAN}${FILE}${PLAIN} (保险快照，跳过自动清理)"
+        echo -e "${GREEN}快照完成: ${CYAN}${FILE}${PLAIN} (安全快照，跳过自动清理)"
     fi
     LATEST_BACKUP_FILE="$FILE"
 }
@@ -292,6 +295,7 @@ EOF
     cmd_show_panel
 }
 
+# --- 6. 升级流程：包含 Level 1 运行时回滚 与 Level 2 完整数据快照提示 ---
 cmd_update() {
     check_root; init_docker_compose
     local CURRENT_VERSION
@@ -318,7 +322,7 @@ cmd_update() {
     cmd_backup false
     local SAFETY_BACKUP="$LATEST_BACKUP_FILE"
 
-    # 2. 创建同文件系统运行时快照 (Level 1)
+    # 2. 创建同文件系统运行时快照 (用于快速 Level 1 自动回滚)
     rm -rf "${ROLLBACK_DIR}"
     mkdir -p "${ROLLBACK_DIR}"
     cp "${N8N_DIR}/docker-compose.yml" "${ROLLBACK_DIR}/docker-compose.yml"
@@ -380,7 +384,7 @@ cmd_update() {
     echo -e "${GREEN}升级完成且健康检查通过！当前运行版本: ${CYAN}v${LATEST_OFFICIAL}${PLAIN}"
 }
 
-# --- 恢复函数：增加隔离副本与防吞保护 ---
+# --- 7. 恢复函数：增加隔离副本与防吞保护 ---
 cmd_recover() {
     init_docker_compose
     if [ ! -d "${BACKUP_DIR}" ] || ! ls "${BACKUP_DIR}"/n8n_*.tar.gz 1> /dev/null 2>&1; then
@@ -394,7 +398,7 @@ cmd_recover() {
 
     local TARGET_FILE=$(ls "${BACKUP_DIR}"/n8n_*.tar.gz | sed -n "${IDX}p")
 
-    # 1. 拷贝目标恢复文件至隔离临时区 (双重保险防止被任何机制误删)
+    # 1. 拷贝目标恢复文件至隔离临时区 (双重保险防止被任何清理机制误删)
     local RESTORE_HOLD="${N8N_DIR}/.restore_target.tar.gz"
     cp -a "$TARGET_FILE" "$RESTORE_HOLD"
 
