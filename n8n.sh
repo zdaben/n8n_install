@@ -1,7 +1,7 @@
 #!/bin/bash
 #=================================================================#
 #  System Required: Debian 12+ / Ubuntu 22+                       #
-#  Description: n8n CLI Management Tool (V2.3 Production Final)   #
+#  Description: n8n CLI Management Tool (V2.4 Enterprise)         #
 #  Author: zdaben (https://github.com/zdaben/n8n_install)         #
 #=================================================================#
 
@@ -15,6 +15,7 @@ PLAIN='\033[0m'
 
 N8N_DIR="/root/n8n"
 BACKUP_DIR="${N8N_DIR}/backup"
+ROLLBACK_DIR="${N8N_DIR}/.rollback"
 DOCKER_COMPOSE_CMD=""
 I18N_REPO="zdaben/n8n-chinese"
 
@@ -36,15 +37,11 @@ init_docker_compose() {
     fi
 }
 
-# --- 1. 严格对齐版本契约 (NPM latest -> GitHub Non-Prerelease) ---
 get_official_latest_version() {
     local VER=""
-
-    # 权威源 1: NPM 官方 registry (权威、CDN 加速、无速率限制)
     VER=$(curl -fsSL --connect-timeout 5 --max-time 10 "https://registry.npmjs.org/n8n/latest" 2>/dev/null \
         | jq -r '.version // empty' 2>/dev/null || true)
 
-    # 权威源 2: GitHub Releases 过滤正式版本
     if [ -z "$VER" ]; then
         VER=$(curl -fsSL --connect-timeout 5 --max-time 10 -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/n8n-io/n8n/releases" 2>/dev/null \
             | jq -r '[.[] | select(.prerelease == false and (.tag_name | contains("alpha") or contains("beta") | not))] | .[0].tag_name' 2>/dev/null \
@@ -53,7 +50,7 @@ get_official_latest_version() {
     fi
 
     if [ -z "$VER" ]; then
-        echo -e "${RED}错误：无法连接上游官方源确认 Stable 版本，操作已终止。${PLAIN}" >&2
+        echo -e "${RED}错误：无法连接官方源确认 Stable 版本，操作已终止。${PLAIN}" >&2
         return 1
     fi
     echo "$VER"
@@ -109,7 +106,7 @@ cmd_show_panel() {
     local PORT=$(grep -oE '127\.0\.0\.1:[0-9]+' "${N8N_DIR}/docker-compose.yml" | cut -d':' -f2 | head -n 1 || echo "5678")
 
     echo -e "\n${GREEN}===========================================================${PLAIN}"
-    echo -e "${GREEN}n8n 管理面板 (V2.3 Production)${PLAIN}"
+    echo -e "${GREEN}n8n 管理面板 (V2.4 Enterprise)${PLAIN}"
     echo -e "-----------------------------------------------------------"
     echo -e "访问地址: ${YELLOW}https://${DOMAIN}${PLAIN}"
     echo -e "管理账号: ${CYAN}admin${PLAIN}"
@@ -117,13 +114,13 @@ cmd_show_panel() {
     echo -e "加密密钥: ${CYAN}********${PLAIN} ${YELLOW}(运行 'n8n secrets' 查看明文)${PLAIN}"
     echo -e "内部端口: ${CYAN}${PORT}${PLAIN}"
     echo -e "-----------------------------------------------------------"
-    echo -e "常用指令:"
+    echo -e "命令列表:"
     echo -e "  ${YELLOW}n8n status${PLAIN}    - 查看服务状态与资源占用"
-    echo -e "  ${YELLOW}n8n update${PLAIN}    - 升级官方引擎 (支持自动回滚)"
+    echo -e "  ${YELLOW}n8n update${PLAIN}    - 升级引擎 (支持双层安全回滚)"
     echo -e "  ${YELLOW}n8n secrets${PLAIN}   - 查看明文账号、密码与加密密钥"
     echo -e "  ${YELLOW}n8n restart${PLAIN}   - 重启容器服务"
-    echo -e "  ${YELLOW}n8n backup${PLAIN}    - 立即全量备份 (含数据与 UI)"
-    echo -e "  ${YELLOW}n8n recover${PLAIN}   - 从历史归档中恢复数据"
+    echo -e "  ${YELLOW}n8n backup${PLAIN}    - 立即全量备份 (含数据、UI 与配置)"
+    echo -e "  ${YELLOW}n8n recover${PLAIN}   - 从历史归档中安全恢复"
     echo -e "  ${RED}n8n uninstall${PLAIN} - 彻底卸载并清理数据"
     echo -e "===========================================================${PLAIN}"
 }
@@ -142,6 +139,16 @@ cmd_secrets() {
     echo -e "管理密码: ${CYAN}${PASS}${PLAIN}"
     echo -e "加密密钥: ${CYAN}${KEY}${PLAIN}"
     echo -e "================================\n"
+}
+
+cmd_backup() {
+    mkdir -p "${BACKUP_DIR}"
+    local FILE="${BACKUP_DIR}/n8n_$(date +%Y%m%d_%H%M%S).tar.gz"
+    cd "${N8N_DIR}"
+    nice -n 19 ionice -c2 -n7 tar czf "${FILE}" n8n_data n8n_files n8n_ui docker-compose.yml
+    find "${BACKUP_DIR}" -name "n8n_*.tar.gz" -mtime +7 -delete
+    echo -e "${GREEN}备份完成: ${CYAN}${FILE}${PLAIN} (包含数据、配置与前端 UI，保留 7 天)"
+    LATEST_BACKUP_FILE="$FILE"
 }
 
 cmd_install() {
@@ -274,7 +281,7 @@ EOF
     cmd_show_panel
 }
 
-# --- 核心升级函数：包含完整的自动回滚机制 ---
+# --- 升级流程：包含 Level 1 运行时回滚 与 Level 2 完整数据快照提示 ---
 cmd_update() {
     check_root; init_docker_compose
     local CURRENT_VERSION
@@ -282,7 +289,6 @@ cmd_update() {
     
     local LATEST_OFFICIAL
     LATEST_OFFICIAL=$(get_official_latest_version)
-
     local PORT=$(grep -oE '127\.0\.0\.1:[0-9]+' "${N8N_DIR}/docker-compose.yml" | cut -d':' -f2 | head -n 1 || echo "5678")
 
     echo -e "当前本地运行版本: ${CYAN}v${CURRENT_VERSION}${PLAIN}"
@@ -297,12 +303,18 @@ cmd_update() {
     read -p "确认升级至 v${LATEST_OFFICIAL}？(y/n) [默认: y]: " CONFIRM
     [[ "$CONFIRM" =~ ^[Nn]$ ]] && exit 0
 
-    echo -e "${GREEN}==> 正在创建升级前环境快照 (用于故障自动回滚)...${PLAIN}"
-    cp "${N8N_DIR}/docker-compose.yml" "${N8N_DIR}/docker-compose.yml.bak"
-    rm -rf /tmp/n8n_ui_bak
-    [ -d "${N8N_DIR}/n8n_ui" ] && cp -r "${N8N_DIR}/n8n_ui" /tmp/n8n_ui_bak
+    # 1. 创建升级前持久化全量安全快照
+    echo -e "${GREEN}==> [安全机制] 正在创建升级前全量数据快照...${PLAIN}"
+    cmd_backup
+    local SAFETY_BACKUP="$LATEST_BACKUP_FILE"
 
-    # 尝试下载新补丁
+    # 2. 创建同文件系统运行时快照 (用于快速 Level 1 自动回滚)
+    rm -rf "${ROLLBACK_DIR}"
+    mkdir -p "${ROLLBACK_DIR}"
+    cp "${N8N_DIR}/docker-compose.yml" "${ROLLBACK_DIR}/docker-compose.yml"
+    [ -d "${N8N_DIR}/n8n_ui" ] && cp -a "${N8N_DIR}/n8n_ui" "${ROLLBACK_DIR}/n8n_ui"
+
+    # 3. 下载补丁
     if download_i18n_patch "$LATEST_OFFICIAL"; then
         rm -rf "${N8N_DIR}/n8n_ui/dist"
         tar -xzf /tmp/editor-ui.tar.gz -C "${N8N_DIR}/n8n_ui"
@@ -318,46 +330,45 @@ cmd_update() {
     sed -i "s|image: n8nio/n8n:.*|image: n8nio/n8n:${LATEST_OFFICIAL}|g" "${N8N_DIR}/docker-compose.yml"
     cd "${N8N_DIR}" && $DOCKER_COMPOSE_CMD pull && $DOCKER_COMPOSE_CMD up -d
 
-    # 探针验证：如果失败执行自动回滚
+    # 4. 健康检查与分级回滚
     if ! wait_for_n8n "$PORT"; then
         echo -e "\n${RED}===========================================================${PLAIN}"
-        echo -e "${RED}⚠️  检测到 v${LATEST_OFFICIAL} 启动异常！触发原子级自动回滚机制...${PLAIN}"
+        echo -e "${RED}⚠️  检测到 v${LATEST_OFFICIAL} 启动异常！触发 Level 1 运行时自动回滚...${PLAIN}"
         echo -e "${RED}===========================================================${PLAIN}"
 
-        # 1. 恢复 Compose 与 UI 快照
-        cp "${N8N_DIR}/docker-compose.yml.bak" "${N8N_DIR}/docker-compose.yml"
+        # Level 1 回滚
+        cp "${ROLLBACK_DIR}/docker-compose.yml" "${N8N_DIR}/docker-compose.yml"
         rm -rf "${N8N_DIR}/n8n_ui"
-        [ -d /tmp/n8n_ui_bak ] && cp -r /tmp/n8n_ui_bak "${N8N_DIR}/n8n_ui"
+        [ -d "${ROLLBACK_DIR}/n8n_ui" ] && cp -a "${ROLLBACK_DIR}/n8n_ui" "${N8N_DIR}/n8n_ui"
 
-        # 2. 拉起原版本
         $DOCKER_COMPOSE_CMD up -d
 
-        # 3. 再次校验回滚状态
         if wait_for_n8n "$PORT"; then
-            echo -e "${GREEN}✅ 已成功回滚至原版本 v${CURRENT_VERSION}，服务运行正常。${PLAIN}"
+            echo -e "${GREEN}✅ Level 1 回滚成功：已安全恢复至原版本 v${CURRENT_VERSION}。${PLAIN}"
+            rm -rf "${ROLLBACK_DIR}"
+            exit 1
         else
-            echo -e "${RED}❌ 回滚后服务依然异常，请立即执行 'docker logs n8n' 查看数据库或配置错误！${PLAIN}"
+            echo -e "${RED}❌ 警告：Level 1 回滚后服务依然异常，可能已发生不可逆的数据库迁移！${PLAIN}"
+            echo -e "安全快照归档位于: ${CYAN}${SAFETY_BACKUP}${PLAIN}"
+            read -p "是否立即执行 Level 2 完整数据库覆盖回滚？(yes/no) [默认: no]: " DATA_ROLLBACK
+            if [ "$DATA_ROLLBACK" == "yes" ]; then
+                $DOCKER_COMPOSE_CMD down
+                rm -rf n8n_data n8n_files n8n_ui docker-compose.yml
+                tar xzf "${SAFETY_BACKUP}" -C "${N8N_DIR}"
+                chown -R 1000:1000 n8n_data n8n_files n8n_ui 2>/dev/null || true
+                $DOCKER_COMPOSE_CMD up -d
+                if wait_for_n8n "$PORT"; then
+                    echo -e "${GREEN}✅ Level 2 完整数据回滚成功！系统已完全还原至升级前状态。${PLAIN}"
+                fi
+            fi
+            rm -rf "${ROLLBACK_DIR}"
+            exit 1
         fi
-
-        rm -f "${N8N_DIR}/docker-compose.yml.bak" /tmp/n8n_ui_bak
-        exit 1
     fi
 
-    # 清理临时备份
-    rm -f "${N8N_DIR}/docker-compose.yml.bak"
-    rm -rf /tmp/n8n_ui_bak
+    rm -rf "${ROLLBACK_DIR}"
     docker image prune -f
     echo -e "${GREEN}升级完成且健康检查通过！当前运行版本: ${CYAN}v${LATEST_OFFICIAL}${PLAIN}"
-}
-
-cmd_backup() {
-    mkdir -p "${BACKUP_DIR}"
-    local FILE="${BACKUP_DIR}/n8n_$(date +%Y%m%d_%H%M%S).tar.gz"
-    cd "${N8N_DIR}"
-    # 将 UI 与配置一并纳入原子化灾备
-    nice -n 19 ionice -c2 -n7 tar czf "${FILE}" n8n_data n8n_files n8n_ui docker-compose.yml
-    find "${BACKUP_DIR}" -name "n8n_*.tar.gz" -mtime +7 -delete
-    echo -e "${GREEN}备份完成: ${CYAN}${FILE}${PLAIN} (包含数据、配置与前端 UI，保留 7 天)"
 }
 
 cmd_recover() {
@@ -372,12 +383,26 @@ cmd_recover() {
     [ "$IDX" -eq 0 ] && exit 0
 
     local FILE=$(ls "${BACKUP_DIR}"/n8n_*.tar.gz | sed -n "${IDX}p")
+
+    # 1. 恢复前创建“防误触”安全快照
+    echo -e "${GREEN}==> [安全机制] 正在对当前环境创建恢复前保险快照...${PLAIN}"
+    cmd_backup
+
+    # 2. 执行恢复
+    echo -e "${GREEN}==> 开始从归档文件 ${FILE} 恢复数据...${PLAIN}"
     cd "${N8N_DIR}" && $DOCKER_COMPOSE_CMD down
     rm -rf n8n_data n8n_files n8n_ui docker-compose.yml
     tar xzf "${FILE}" -C "${N8N_DIR}"
     chown -R 1000:1000 n8n_data n8n_files n8n_ui 2>/dev/null || true
     $DOCKER_COMPOSE_CMD up -d
-    echo -e "${GREEN}数据与 UI 恢复完成！${PLAIN}"
+
+    local PORT=$(grep -oE '127\.0\.0\.1:[0-9]+' "${N8N_DIR}/docker-compose.yml" | cut -d':' -f2 | head -n 1 || echo "5678")
+    if ! wait_for_n8n "$PORT"; then
+        echo -e "${RED}错误：数据已解压，但服务健康检查未通过！请执行 'docker logs n8n' 查看原因。${PLAIN}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}数据与 UI 恢复完成，服务已健康就绪！${PLAIN}"
 }
 
 cmd_uninstall() {
