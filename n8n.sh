@@ -82,10 +82,12 @@ set_i18n_mount() {
     local COMPOSE_FILE="${N8N_DIR}/docker-compose.yml"
     [ ! -f "$COMPOSE_FILE" ] && return 0
 
+    # 清理所有历史挂载行
     sed -i '/n8n_ui\/dist:/d' "$COMPOSE_FILE"
 
+    # 同时挂载真实 pnpm 目录与标准目录（兼容所有 1.x 与 2.x 版本镜像）
     if [ "$ENABLE" = "true" ]; then
-        sed -i '/- .\/n8n_files:\/files/a\      - ./n8n_ui/dist:/usr/local/lib/node_modules/n8n/node_modules/n8n-editor-ui/dist' "$COMPOSE_FILE"
+        sed -i '/- .\/n8n_files:\/files/a\      - ./n8n_ui/dist:/usr/local/lib/node_modules/n8n/node_modules/.pnpm/n8n-editor-ui@file+packages+frontend+editor-ui/node_modules/n8n-editor-ui/dist\n      - ./n8n_ui/dist:/usr/local/lib/node_modules/n8n/node_modules/n8n-editor-ui/dist' "$COMPOSE_FILE"
     fi
 }
 
