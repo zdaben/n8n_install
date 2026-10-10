@@ -37,11 +37,29 @@ init_docker_compose() {
     fi
 }
 
-# --- 1. 严格读取官方 dist-tags (Stable 轨道)，绝不猜版本 ---
+# --- 1. 获取 zdaben/n8n-chinese 汉化仓库最新 Release 版本 (免 API 限流) ---
+get_chinese_latest_version() {
+    local VER=""
+    # 优先源: 302 重定向 Location 解析 (不消耗 GitHub API 速率限制配额)
+    local LOC
+    LOC=$(curl -sI --connect-timeout 5 --max-time 10 "https://github.com/${I18N_REPO}/releases/latest" 2>/dev/null | grep -i "^location:" || true)
+    VER=$(echo "$LOC" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
+
+    # 备用源: GitHub REST API
+    if [ -z "$VER" ]; then
+        VER=$(curl -fsSL --connect-timeout 5 --max-time 10 -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/${I18N_REPO}/releases/latest" 2>/dev/null \
+            | jq -r '.tag_name // empty' 2>/dev/null \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' \
+            | head -n1 || true)
+    fi
+    echo "$VER"
+}
+
+# --- 2. 严格读取官方 dist-tags (Stable 轨道) ---
 get_official_latest_version() {
     local VER=""
 
-    # 优先源: 官方 npm dist-tags 中的 stable 轨道 (未来兼容)，回落 latest
+    # 优先源: 官方 npm dist-tags 中的 stable 轨道，回落 latest
     VER=$(curl -fsSL --connect-timeout 5 --max-time 10 "https://registry.npmjs.org/-/package/n8n/dist-tags" 2>/dev/null \
         | jq -r '.stable // .latest // empty' 2>/dev/null || true)
 
@@ -60,7 +78,7 @@ get_official_latest_version() {
     echo "$VER"
 }
 
-# --- 2. 精确从专属自建仓库下载对应版本的汉化包 ---
+# --- 3. 精确从专属自建仓库下载对应版本的汉化包 ---
 download_i18n_patch() {
     local TVERSION="$1"
     echo -e "${GREEN}==> 正在检索 v${TVERSION} 汉化补丁包...${PLAIN}"
@@ -76,7 +94,7 @@ download_i18n_patch() {
     fi
 }
 
-# --- 3. 显式动态管理 Compose 文件的 UI 挂载（彻底杜绝跨版本残留） ---
+# --- 4. 显式动态管理 Compose 文件的 UI 挂载（彻底杜绝跨版本残留） ---
 set_i18n_mount() {
     local ENABLE="$1"
     local COMPOSE_FILE="${N8N_DIR}/docker-compose.yml"
@@ -91,7 +109,7 @@ set_i18n_mount() {
     fi
 }
 
-# --- 4. 服务健康就绪探针 (最长等待 60s) ---
+# --- 5. 服务健康就绪探针 (最长等待 60s) ---
 wait_for_n8n() {
     local PORT="$1"
     echo -e "${GREEN}==> 正在等待 n8n 服务健康就绪...${PLAIN}"
@@ -150,7 +168,7 @@ cmd_secrets() {
     echo -e "================================\n"
 }
 
-# --- 5. 支持参数化控制 retention 清理与友好交互提示的备份函数 ---
+# --- 6. 备份函数 ---
 cmd_backup() {
     local DO_PRUNE="${1:-true}"
     mkdir -p "${BACKUP_DIR}"
@@ -160,7 +178,7 @@ cmd_backup() {
     echo -e "${GREEN}==> 正在创建数据与配置全量备份，请稍候...${PLAIN}"
     echo -e "归档目标: ${CYAN}n8n_data, n8n_files, n8n_ui, docker-compose.yml${PLAIN}"
 
-    # 后台执行压缩
+    # 后台低优先级压缩
     nice -n 19 ionice -c2 -n7 tar czf "${FILE}" n8n_data n8n_files n8n_ui docker-compose.yml
 
     local FILE_SIZE=$(du -h "${FILE}" | awk '{print $1}')
@@ -174,6 +192,7 @@ cmd_backup() {
     LATEST_BACKUP_FILE="$FILE"
 }
 
+# --- 7. 安装流程：优先安装汉化版本 ---
 cmd_install() {
     check_root
     echo -e "${GREEN}==> 正在准备系统环境与必要依赖...${PLAIN}"
@@ -215,9 +234,18 @@ cmd_install() {
     RANDOM_KEY=${OLD_KEY:-$(tr -dc 'a-z0-9' </dev/urandom | head -c 32)}
     BASIC_AUTH_PASS=${OLD_PASS:-$(tr -dc 'a-z0-9' </dev/urandom | head -c 12)}
 
+    # 安装版本决策：优先安装汉化支持的最新稳定版
     local TARGET_VERSION
-    TARGET_VERSION=$(get_official_latest_version)
-    echo -e "准备安装 n8n 官方引擎版本: ${CYAN}v${TARGET_VERSION}${PLAIN}"
+    local LATEST_CHINESE
+    LATEST_CHINESE=$(get_chinese_latest_version)
+
+    if [ -n "$LATEST_CHINESE" ]; then
+        TARGET_VERSION="$LATEST_CHINESE"
+        echo -e "准备安装 n8n 引擎版本 (汉化稳定版): ${CYAN}v${TARGET_VERSION}${PLAIN}"
+    else
+        TARGET_VERSION=$(get_official_latest_version)
+        echo -e "${YELLOW}未检测到汉化发布，降级安装官方版本: v${TARGET_VERSION}${PLAIN}"
+    fi
 
     cat > "${N8N_DIR}/docker-compose.yml" <<EOF
 services:
@@ -304,59 +332,110 @@ EOF
     cmd_show_panel
 }
 
-# --- 6. 升级流程：包含 Level 1 运行时回滚 与 Level 2 完整数据快照提示 ---
+# --- 8. 升级流程：以汉化版本为基准决策，带熔断保护 ---
 cmd_update() {
     check_root; init_docker_compose
     local CURRENT_VERSION
-    CURRENT_VERSION=$(grep -oE 'n8nio/n8n:[a-zA-Z0-9.-]+' "${N8N_DIR}/docker-compose.yml" | cut -d':' -f2 || echo "未知")
+    CURRENT_VERSION=$(grep -oE 'n8nio/n8n:[a-zA-Z0-9.-]+' "${N8N_DIR}/docker-compose.yml" | cut -d':' -f2 | sed 's/^v//' || echo "未知")
     
+    local PORT
+    PORT=$(grep -oE '127\.0\.0\.1:[0-9]+' "${N8N_DIR}/docker-compose.yml" | cut -d':' -f2 | head -n 1 || echo "5678")
+
+    echo -e "${GREEN}==> 正在检索版本更新信息...${PLAIN}"
+    local LATEST_CHINESE
+    LATEST_CHINESE=$(get_chinese_latest_version)
+
     local LATEST_OFFICIAL
     LATEST_OFFICIAL=$(get_official_latest_version)
-    local PORT=$(grep -oE '127\.0\.0\.1:[0-9]+' "${N8N_DIR}/docker-compose.yml" | cut -d':' -f2 | head -n 1 || echo "5678")
 
-    echo -e "当前本地运行版本: ${CYAN}v${CURRENT_VERSION}${PLAIN}"
-    echo -e "官方最新 Stable 版本: ${YELLOW}v${LATEST_OFFICIAL}${PLAIN}"
+    echo -e "当前本地运行版本    : ${CYAN}v${CURRENT_VERSION}${PLAIN}"
+    echo -e "汉化支持最新版本    : ${GREEN}v${LATEST_CHINESE:-未知}${PLAIN}"
+    echo -e "官方最新 Stable 版本: ${YELLOW}v${LATEST_OFFICIAL:-未知}${PLAIN}"
 
-    if [ "$CURRENT_VERSION" == "$LATEST_OFFICIAL" ]; then
-        echo -e "\n${GREEN}当前系统已经是官方最新稳定版本。${PLAIN}"
-        read -p "是否强制重新拉取并部署？(y/n) [默认: n]: " FORCE_UPDATE
-        [[ ! "$FORCE_UPDATE" =~ ^[Yy]$ ]] && exit 0
+    local TARGET_VERSION=""
+    local IS_CHINESE=true
+
+    # 场景 A: 汉化仓库获取成功，以汉化版本为基准升级
+    if [ -n "$LATEST_CHINESE" ]; then
+        if [ "$CURRENT_VERSION" == "$LATEST_CHINESE" ]; then
+            echo -e "\n${GREEN}✔ 当前系统已经是汉化支持的最新稳定版 (v${CURRENT_VERSION})。${PLAIN}"
+            if [ -n "$LATEST_OFFICIAL" ] && [ "$LATEST_OFFICIAL" != "$CURRENT_VERSION" ]; then
+                echo -e "${YELLOW}提示：官方已发布原生版本 v${LATEST_OFFICIAL}，但汉化补丁仍在适配制作中。${PLAIN}"
+                read -p "是否强制升级至官方未汉化英文原生界面？(y/N) [默认: N]: " FORCE_OFFICIAL
+                if [[ "$FORCE_OFFICIAL" =~ ^[Yy]$ ]]; then
+                    TARGET_VERSION="$LATEST_OFFICIAL"
+                    IS_CHINESE=false
+                else
+                    echo "操作已取消，保持当前汉化环境。"
+                    exit 0
+                fi
+            else
+                read -p "是否强制重新拉取并重构当前容器？(y/N) [默认: N]: " FORCE_REBUILD
+                [[ ! "$FORCE_REBUILD" =~ ^[Yy]$ ]] && exit 0
+                TARGET_VERSION="$CURRENT_VERSION"
+                IS_CHINESE=true
+            fi
+        else
+            echo -e "\n${GREEN}检测到可升级的汉化版本：v${CURRENT_VERSION} -> v${LATEST_CHINESE}${PLAIN}"
+            read -p "确认升级至最新汉化版本 v${LATEST_CHINESE}？(y/N) [默认: y]: " CONFIRM
+            CONFIRM=${CONFIRM:-y}
+            [[ ! "$CONFIRM" =~ ^[Yy]$ ]] && exit 0
+            TARGET_VERSION="$LATEST_CHINESE"
+            IS_CHINESE=true
+        fi
+    else
+        # 场景 B: 汉化源网络受限无法读取，回落至官方确认逻辑
+        echo -e "\n${YELLOW}⚠️  未能连接汉化仓库检索版本信息，仅检测到官方最新版本: v${LATEST_OFFICIAL}${PLAIN}"
+        read -p "确认以官方版本升级？(可能无法汉化) (y/N) [默认: N]: " CONFIRM_OFFICIAL
+        [[ ! "$CONFIRM_OFFICIAL" =~ ^[Yy]$ ]] && exit 0
+        TARGET_VERSION="$LATEST_OFFICIAL"
+        IS_CHINESE=false
     fi
 
-    read -p "确认升级至 v${LATEST_OFFICIAL}？(y/n) [默认: y]: " CONFIRM
-    [[ "$CONFIRM" =~ ^[Nn]$ ]] && exit 0
+    # 1. 汉化补丁预检与下载熔断（核心防护：成功后才动容器与配置）
+    if [ "$IS_CHINESE" = true ]; then
+        if ! download_i18n_patch "$TARGET_VERSION"; then
+            echo -e "\n${RED}===========================================================${PLAIN}"
+            echo -e "${RED}❌ [升级中断] 未能成功下载 v${TARGET_VERSION} 的汉化补丁包！${PLAIN}"
+            echo -e "${RED}为防止升级后变成英文界面或出现版本错配，升级已自动中止。${PLAIN}"
+            echo -e "${RED}您的当前版本环境 (v${CURRENT_VERSION}) 保持不变。${PLAIN}"
+            echo -e "${RED}===========================================================${PLAIN}"
+            exit 1
+        fi
+    fi
 
-    # 1. 创建升级前持久化全量安全快照 (明确禁用 prune)
+    # 2. 创建升级前持久化全量安全快照 (明确禁用 prune)
     echo -e "${GREEN}==> [安全机制] 正在创建升级前全量数据快照...${PLAIN}"
     cmd_backup false
     local SAFETY_BACKUP="$LATEST_BACKUP_FILE"
 
-    # 2. 创建同文件系统运行时快照 (用于快速 Level 1 自动回滚)
+    # 3. 创建同文件系统运行时快照 (用于快速 Level 1 自动回滚)
     rm -rf "${ROLLBACK_DIR}"
     mkdir -p "${ROLLBACK_DIR}"
     cp "${N8N_DIR}/docker-compose.yml" "${ROLLBACK_DIR}/docker-compose.yml"
     [ -d "${N8N_DIR}/n8n_ui" ] && cp -a "${N8N_DIR}/n8n_ui" "${ROLLBACK_DIR}/n8n_ui"
 
-    # 3. 下载补丁
-    if download_i18n_patch "$LATEST_OFFICIAL"; then
+    # 4. 解压部署 UI 或移除挂载
+    if [ "$IS_CHINESE" = true ]; then
         rm -rf "${N8N_DIR}/n8n_ui/dist"
         tar -xzf /tmp/editor-ui.tar.gz -C "${N8N_DIR}/n8n_ui"
         chown -R 1000:1000 "${N8N_DIR}/n8n_ui"
         rm -f /tmp/editor-ui.tar.gz
         set_i18n_mount true
     else
-        echo -e "${YELLOW}升级提示：新版本未检测到匹配汉化包，自动移除旧 UI 挂载并使用官方原生界面。${PLAIN}"
+        echo -e "${YELLOW}升级提示：正在移除汉化 UI 挂载，使用官方原生界面...${PLAIN}"
         rm -rf "${N8N_DIR}/n8n_ui/dist"
         set_i18n_mount false
     fi
 
-    sed -i "s|image: n8nio/n8n:.*|image: n8nio/n8n:${LATEST_OFFICIAL}|g" "${N8N_DIR}/docker-compose.yml"
+    # 5. 更新 compose 文件版本并拉取部署
+    sed -i "s|image: n8nio/n8n:.*|image: n8nio/n8n:${TARGET_VERSION}|g" "${N8N_DIR}/docker-compose.yml"
     cd "${N8N_DIR}" && $DOCKER_COMPOSE_CMD pull && $DOCKER_COMPOSE_CMD up -d
 
-    # 4. 健康检查与分级回滚
+    # 6. 健康检查与双层回滚
     if ! wait_for_n8n "$PORT"; then
         echo -e "\n${RED}===========================================================${PLAIN}"
-        echo -e "${RED}⚠️  检测到 v${LATEST_OFFICIAL} 启动异常！触发 Level 1 运行时自动回滚...${PLAIN}"
+        echo -e "${RED}⚠️  检测到 v${TARGET_VERSION} 启动异常！触发 Level 1 运行时自动回滚...${PLAIN}"
         echo -e "${RED}===========================================================${PLAIN}"
 
         cp "${ROLLBACK_DIR}/docker-compose.yml" "${N8N_DIR}/docker-compose.yml"
@@ -390,10 +469,10 @@ cmd_update() {
 
     rm -rf "${ROLLBACK_DIR}"
     docker image prune -f
-    echo -e "${GREEN}升级完成且健康检查通过！当前运行版本: ${CYAN}v${LATEST_OFFICIAL}${PLAIN}"
+    echo -e "${GREEN}升级完成且健康检查通过！当前运行版本: ${CYAN}v${TARGET_VERSION}${PLAIN}"
 }
 
-# --- 7. 恢复函数：增加隔离副本与防吞保护 ---
+# --- 9. 恢复函数：增加隔离副本与防吞保护 ---
 cmd_recover() {
     init_docker_compose
     if [ ! -d "${BACKUP_DIR}" ] || ! ls "${BACKUP_DIR}"/n8n_*.tar.gz 1> /dev/null 2>&1; then
@@ -411,7 +490,7 @@ cmd_recover() {
     local RESTORE_HOLD="${N8N_DIR}/.restore_target.tar.gz"
     cp -a "$TARGET_FILE" "$RESTORE_HOLD"
 
-    # 2. 恢复前创建“防误触”当前状态快照 (明确禁止 prune，防止删除历史归档)
+    # 2. 恢复前创建“防误触”当前状态快照 (明确禁止 prune)
     echo -e "${GREEN}==> [安全机制] 正在对当前环境创建恢复前保险快照...${PLAIN}"
     cmd_backup false
 
